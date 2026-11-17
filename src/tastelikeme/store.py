@@ -20,11 +20,14 @@ def read(path):
     if not p.exists():
         return []
     out = []
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for number, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
         line = line.strip()
         if line:
-            try: out.append(json.loads(line))
-            except json.JSONDecodeError: pass
+            try: record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSON in {p}, line {number}: {exc.msg}") from exc
+            if not isinstance(record, dict): raise ValueError(f"expected object in {p}, line {number}")
+            out.append(record)
     return out
 
 def sid(*parts):
