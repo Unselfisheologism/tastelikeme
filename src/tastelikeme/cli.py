@@ -1,12 +1,13 @@
 """tastelikeme CLI. Dual mode: prompts when a human runs it in a terminal and flags are
 missing; strict flags + --json for agents (or pass --non-interactive). The CLI never
 loops and never calls a model. The harness owns the loop; this owns state and verbs."""
-import argparse, datetime as dt, hashlib, json, re, sys
+import argparse, datetime as dt, hashlib, json, re, sys, uuid
+from pathlib import Path
 from . import __version__, embed, prompts, sources
 from .store import Store, home, now, sid, append, read
 
 def interactive(a):
-    return sys.stdin.isatty() and sys.stdout.isatty() and not a.non_interactive
+    return sys.stdin.isatty() and sys.stdout.isatty() and not a.non_interactive and not a.json
 
 def out(a, obj, text=None):
     if a.json:
@@ -36,19 +37,31 @@ def item_text(it):
     if it.get("description"): return it["description"]
     return " ".join(x for x in (it.get("title"), it.get("text")) if x) or it.get("ref", "")
 
+def active_backend(s):
+    state = s.root / "embedding.json"
+    if state.exists() and json.loads(state.read_text()).get("backend") == "hash": return "hash"
+    return embed.backend()
+
 def vec_for(s, texts):
-    """Cache by (model, text hash). Cache is derived data and safe to delete."""
-    cache = {}
-    for r in read(s.vec_p):
-        cache[(r["model"], r["h"])] = r["v"]
-    model = embed.backend()
+    """Never mix embedding spaces; pin failed model to hash for this store."""
+    state = s.root / "embedding.json"
+    pinned = json.loads(state.read_text()).get("backend") if state.exists() else None
+    model = "hash" if pinned == "hash" else embed.backend()
+    cache = {(r["model"], r["h"]): r["v"] for r in read(s.vec_p)}
     res, missing = {}, []
-    for t in texts:
+    for t in dict.fromkeys(texts):
         h = hashlib.sha1(t.encode()).hexdigest()
         if (model, h) in cache: res[t] = cache[(model, h)]
         else: missing.append((t, h))
     if missing:
-        used, vs = embed.embed_texts([t for t, _ in missing])
+        if model == "hash":
+            used, vs = "hash", [embed._hash_embed(t) for t, _ in missing]
+        else:
+            used, vs = embed.embed_texts([t for t, _ in missing])
+        if used != model:
+            state.write_text(json.dumps({"backend": "hash"}))
+            print("warning: local model unavailable; using lower-quality hashing for this store", file=sys.stderr)
+            return vec_for(s, texts)
         for (t, h), v in zip(missing, vs):
             res[t] = v
             append(s.vec_p, {"model": used, "h": h, "v": [round(x, 5) for x in v]})
@@ -81,12 +94,32 @@ def nearest_cluster(s, cl, text):
     v = vec_for(s, [text])[text]
     return max(cl, key=lambda c: embed.cos(v, c["centroid"])), v
 
+def positive_int(value):
+    try: n = int(value)
+    except (ValueError, TypeError): raise argparse.ArgumentTypeError("must be a positive integer")
+    if n < 1: raise argparse.ArgumentTypeError("must be a positive integer")
+    return n
+
+def validate_config(c):
+    positive_int(c.get("distill_every", 20))
+    cadence = c.get("cadence", "weekly").lower()
+    if cadence not in ("daily", "weekly", "monthly", "off", "manual", "none") and not re.fullmatch(r"[1-9]\d*[hdw]", cadence):
+        raise ValueError("cadence must be daily, weekly, monthly, off, or a positive interval such as 3d or 12h")
+
+def verdict_progress(s):
+    total = sum(r.get("op") == "verdict" for r in read(s.verdicts_p))
+    seen = max([r.get("verdicts_seen", 0) for r in s.rubrics() if r.get("cluster") in (None, "global")] or [0])
+    return total, seen
+
 # ---------- commands ----------
 def cmd_init(a):
-    s = Store(home(a.home)); s.init()
-    c = s.config()
+    s = Store(home(a.home))
+    c = s.config() if s.exists() else {}
     cad = ask(a, a.cadence, "Generation cadence (daily, weekly, 3d, 12h, off)", c.get("cadence", "weekly"))
     c.update(cadence=cad, distill_every=a.distill_every or c.get("distill_every", 20))
+    validate_config(c)
+    s.init()
+    c.setdefault("created", s.config()["created"])
     s.save_config(c)
     out(a, {"ok": True, "root": str(s.root), "config": c}, f"initialized {s.root}\ncadence: {cad}, re-distill every {c['distill_every']} verdicts")
 
@@ -95,7 +128,8 @@ def cmd_config(a):
     if a.set:
         k, _, v = a.set.partition("=")
         if k not in ("cadence", "distill_every"): die("settable keys: cadence, distill_every")
-        c[k] = int(v) if k == "distill_every" else v
+        c[k] = positive_int(v) if k == "distill_every" else v
+        validate_config(c)
         s.save_config(c)
     out(a, c)
 
@@ -113,10 +147,11 @@ def cmd_ingest(a):
         if added == 0: die(f"ingest failed: {e}", 1)
         print(f"warning: stopped early: {e}", file=sys.stderr)
     pending = [i for i in s.canon().values() if not i.get("description")]
-    out(a, {"added": added, "total": len(known), "pending_description": len(pending)},
-        f"added {added} new item(s), canon has {len(known)}, {len(pending)} need a description.")
-    if pending and not a.no_prompt:
-        print("\n" + describe_prompt(pending, a.batch))
+    result = {"added": added, "total": len(known), "pending_description": len(pending)}
+    if pending and not a.no_prompt: result["prompt"] = describe_prompt(pending, a.batch)
+    out(a, result, f"added {added} new item(s), canon has {len(known)}, {len(pending)} need a description.")
+    if pending and not a.no_prompt and not a.json:
+        print("\n" + result["prompt"])
 
 def describe_prompt(pending, batch=25):
     pending = pending[:batch]
@@ -143,11 +178,16 @@ def cmd_describe(a):
     if a.stdin:
         for line in sys.stdin.read().splitlines():
             if line.strip():
-                r = json.loads(line); pairs.append((r["id"], r["description"]))
+                r = json.loads(line)
+                if not isinstance(r, dict) or "id" not in r or "description" not in r:
+                    raise ValueError("each description line needs id and description")
+                pairs.append((r["id"], r["description"]))
     else:
         pairs.append((ask(a, a.id, "item id"), ask(a, a.text, "description")))
     for iid, d in pairs:
-        if iid not in canon: print(f"skip unknown id {iid}", file=sys.stderr); continue
+        if not isinstance(iid, str) or iid not in canon: raise ValueError(f"unknown item id: {iid}")
+        if not isinstance(d, str) or not d.strip(): raise ValueError("description must be a non-empty string")
+    for iid, d in pairs:
         append(s.canon_p, {"op": "describe", "id": iid, "description": d}); n += 1
     out(a, {"described": n}, f"saved {n} description(s)")
 
@@ -159,7 +199,7 @@ def cmd_canon(a):
              "cluster": where.get(i["id"], {}).get("key"), "cluster_label": where.get(i["id"], {}).get("label")} for i in items]
     summ = [{"cluster": c["key"], "label": c["label"], "size": len(c["members"]), "anchor": c["anchor"]} for c in cl]
     if a.json: out(a, {"clusters": summ, "items": rows}); return
-    print(f"{len(rows)} items, {len(cl)} clusters (emergent, from embeddings; embedder={embed.backend()})")
+    print(f"{len(rows)} items, {len(cl)} clusters (emergent, from embeddings; embedder={active_backend(s)})")
     for c in summ:
         print(f"  {c['cluster']}  n={c['size']}  label={c['label'] or '(unlabeled - agent may name it)'}")
     if a.verbose:
@@ -208,6 +248,15 @@ def exemplars(s, cl, cluster, rvec, n):
     return near, sorted(liked, key=key)[:n], sorted(disliked, key=key)[:n]
 
 def make_brief(s, request, cluster_key, n):
+    marker = s.root / "embedding.json"
+    before = marker.read_text() if marker.exists() else None
+    try: return _make_brief(s, request, cluster_key, n)
+    except ValueError:
+        after = marker.read_text() if marker.exists() else None
+        if before == after: raise
+        return _make_brief(s, request, cluster_key, n)
+
+def _make_brief(s, request, cluster_key, n):
     cl, _ = clusters(s)
     cluster, rvec = None, None
     if request and cl:
@@ -217,8 +266,7 @@ def make_brief(s, request, cluster_key, n):
     rubrics = s.rubrics()
     scoped = [r for r in rubrics if cluster and r.get("cluster") == cluster["key"]]
     rub = (scoped or [r for r in rubrics if r.get("cluster") in (None, "global")] or [None])[-1]
-    total = len(s.verdicts())
-    seen = max([r.get("verdicts_seen", 0) for r in rubrics] or [0])
+    total, seen = verdict_progress(s)
     every = s.config().get("distill_every", 20)
     near, liked, disliked = exemplars(s, cl, cluster, rvec, n)
     return {"request": request,
@@ -258,10 +306,14 @@ def cmd_next(a):
 def cmd_log(a):
     s = store(a)
     req = ask(a, a.request, "request")
+    if not req.strip(): raise ValueError("request must not be empty")
     text = a.text
     if text is None and a.file is None:
         text = ask(a, None, "generated content (text, or use --file for an image path)")
-    pid = a.id or sid(req, text or a.file or "", now())
+    if a.file is not None and not Path(a.file).expanduser().is_file():
+        raise ValueError(f"generated file does not exist: {a.file}")
+    pid = a.id or uuid.uuid4().hex[:16]
+    if pid in s.generations(): raise ValueError(f"piece id already exists: {pid}")
     append(s.gens_p, {"op": "generation", "id": pid, "request": req, "purpose": a.purpose or "unspecified", "text": text, "file": a.file})
     out(a, {"piece": pid}, f"logged piece {pid}")
 
@@ -290,7 +342,7 @@ def cmd_verdict(a):
         else:
             followup = prompts.FOLLOWUP
     append(s.verdicts_p, {"op": "verdict", "piece": piece, "verdict": vd, "feedback": fb, "aspect": asp})
-    total = len(s.verdicts()); seen = max([r.get("verdicts_seen", 0) for r in s.rubrics()] or [0])
+    total, seen = verdict_progress(s)
     due = total - seen >= s.config().get("distill_every", 20)
     res = {"piece": piece, "verdict": vd, "needs_followup": followup, "verdicts_total": total, "distill_due": due}
     if followup:
@@ -299,13 +351,23 @@ def cmd_verdict(a):
 
 def cmd_distill(a):
     s = store(a); vs = s.verdicts(); gens = s.generations()
-    seen = max([r.get("verdicts_seen", 0) for r in s.rubrics()] or [0])
-    new = vs[seen:] if not a.all else vs
+    cur = [r for r in s.rubrics() if r.get("cluster", "global") == (a.cluster or "global")]
+    checkpoint = max([r.get("verdict_events_seen", r.get("verdicts_seen", 0)) for r in cur] or [0])
+    touched = {r["piece"] for r in read(s.verdicts_p)[checkpoint:] if "piece" in r}
+    new = vs if a.all else [v for v in vs if v["piece"] in touched]
+    if a.cluster:
+        cl, _ = clusters(s)
+        if not any(c["key"] == a.cluster for c in cl): raise ValueError(f"unknown cluster {a.cluster}")
+        selected = []
+        for v in new:
+            g = gens.get(v["piece"], {})
+            match = nearest_cluster(s, cl, g.get("request", "") + " " + (g.get("text") or ""))
+            if match and match[0]["key"] == a.cluster: selected.append(v)
+        new = selected
     lines = []
     for v in new:
         g = gens.get(v["piece"], {})
         lines.append(f"- {v['verdict'].upper()} [{v['piece']}] request={g.get('request')!r} content={(g.get('text') or g.get('file') or '')[:300]!r} feedback({v.get('aspect') or 'general'})={v.get('feedback') or 'none'}")
-    cur = s.rubrics()
     rub = cur[-1]["text"] if cur else "(none yet)"
     p = prompts.DISTILL.format(rubric=rub, verdicts="\n".join(lines) or "(none)", cluster_flag=f"--cluster {a.cluster}" if a.cluster else "")
     out(a, {"new_verdicts": len(new), "prompt": p}, p)
@@ -313,18 +375,20 @@ def cmd_distill(a):
 def cmd_rubric(a):
     s = store(a)
     if a.action == "set":
+        if a.cluster and not any(c["key"] == a.cluster for c in clusters(s)[0]):
+            raise ValueError(f"unknown cluster {a.cluster}")
         text = a.text if a.text is not None else sys.stdin.read()
         if not text.strip(): die("empty rubric")
-        append(s.rubric_p, {"cluster": a.cluster or "global", "text": text.strip(), "verdicts_seen": len(s.verdicts())})
+        append(s.rubric_p, {"cluster": a.cluster or "global", "text": text.strip(), "verdicts_seen": verdict_progress(s)[0], "verdict_events_seen": len(read(s.verdicts_p))})
         out(a, {"ok": True}, "rubric saved")
     else:
-        r = s.rubrics()
+        r = [r for r in s.rubrics() if r.get("cluster", "global") == (a.cluster or "global")]
         out(a, r[-1] if r else {"text": None}, r[-1]["text"] if r else "(no rubric yet)")
 
 def cmd_status(a):
     s = store(a); items = s.canon().values()
     d = {"root": str(s.root), "canon": len(items), "undescribed": sum(1 for i in items if not i.get("description")),
-         "generations": len(s.generations()), "verdicts": len(s.verdicts()), "embedder": embed.backend(),
+         "generations": len(s.generations()), "verdicts": len(s.verdicts()), "embedder": active_backend(s),
          "config": s.config(), "due": gens_due(s)}
     out(a, d)
 
@@ -337,22 +401,22 @@ def build():
     sp = p.add_subparsers(dest="cmd", required=True)
     def add(name, fn, help):
         q = sp.add_parser(name, help=help); q.set_defaults(fn=fn); return q
-    q = add("init", cmd_init, "create the store"); q.add_argument("--cadence"); q.add_argument("--distill-every", type=int)
+    q = add("init", cmd_init, "create the store"); q.add_argument("--cadence"); q.add_argument("--distill-every", type=positive_int)
     q = add("config", cmd_config, "show or set config"); q.add_argument("--set", metavar="KEY=VALUE")
     q = add("ingest", cmd_ingest, "add saved content"); q.add_argument("source", choices=list(sources.SOURCES)); q.add_argument("target")
-    q.add_argument("--no-prompt", action="store_true"); q.add_argument("--batch", type=int, default=25)
-    q = add("prompt", cmd_prompt, "emit the creative-director description prompt for undescribed items"); q.add_argument("--batch", type=int, default=25)
+    q.add_argument("--no-prompt", action="store_true"); q.add_argument("--batch", type=positive_int, default=25)
+    q = add("prompt", cmd_prompt, "emit the creative-director description prompt for undescribed items"); q.add_argument("--batch", type=positive_int, default=25)
     q = add("describe", cmd_describe, "save an item description"); q.add_argument("--id"); q.add_argument("--text"); q.add_argument("--stdin", action="store_true")
-    q = add("canon", cmd_canon, "list canon and emergent clusters"); q.add_argument("--k", type=int); q.add_argument("-v", "--verbose", action="store_true")
+    q = add("canon", cmd_canon, "list canon and emergent clusters"); q.add_argument("--k", type=positive_int); q.add_argument("-v", "--verbose", action="store_true")
     q = add("label", cmd_label, "name a cluster (human display only)"); q.add_argument("cluster"); q.add_argument("name")
     add("due", cmd_due, "is a generation due per cadence?")
     for nm, fn, h in (("brief", cmd_brief, "rubric + top liked/disliked exemplars for the request's cluster"),
                       ("next", cmd_next, "brief + generation instructions + due state")):
-        q = add(nm, fn, h); q.add_argument("--request"); q.add_argument("--cluster"); q.add_argument("--n", type=int, default=3)
+        q = add(nm, fn, h); q.add_argument("--request"); q.add_argument("--cluster"); q.add_argument("--n", type=positive_int, default=3)
         if nm == "next": q.add_argument("--purpose", help="thumbnail, script, tweet... a tag, not a taste category")
-    q = add("log", cmd_log, "record a generated piece"); q.add_argument("--request"); q.add_argument("--purpose"); q.add_argument("--text"); q.add_argument("--file"); q.add_argument("--id")
-    q = add("verdict", cmd_verdict, "thumbs up/down (+ targeted feedback)"); q.add_argument("--piece"); q.add_argument("--up", action="store_true")
-    q.add_argument("--down", action="store_true"); q.add_argument("--feedback"); q.add_argument("--aspect")
+    q = add("log", cmd_log, "record a generated piece"); q.add_argument("--request"); q.add_argument("--purpose"); payload = q.add_mutually_exclusive_group(); payload.add_argument("--text"); payload.add_argument("--file"); q.add_argument("--id")
+    q = add("verdict", cmd_verdict, "thumbs up/down (+ targeted feedback)"); q.add_argument("--piece"); vote = q.add_mutually_exclusive_group(); vote.add_argument("--up", action="store_true")
+    vote.add_argument("--down", action="store_true"); q.add_argument("--feedback"); q.add_argument("--aspect")
     q = add("distill", cmd_distill, "emit the rubric-distillation prompt"); q.add_argument("--all", action="store_true"); q.add_argument("--cluster")
     q = add("rubric", cmd_rubric, "show or set the rubric"); q.add_argument("action", choices=["show", "set"]); q.add_argument("--text"); q.add_argument("--cluster")
     add("status", cmd_status, "counts and config")
@@ -363,6 +427,8 @@ def main(argv=None):
     try: a.fn(a)
     except BrokenPipeError: pass
     except KeyboardInterrupt: sys.exit(130)
+    except (ValueError, TypeError, OSError, argparse.ArgumentTypeError) as exc:
+        die(str(exc))
 
 if __name__ == "__main__":
     main()
