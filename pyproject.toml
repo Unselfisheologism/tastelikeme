@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tastelikeme"
+version = "0.1.0"
+description = "Turn your saved content into a taste canon your own coding agent can generate and judge against."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["fastembed>=0.3"]
+
+[project.optional-dependencies]
+# fastembed (small ONNX model, CPU only, ~130MB download on first use) is a default dependency.
+# If it is missing or the model cannot download, a deterministic hashing embedder is used.
+lite = []
+
+[project.scripts]
+tastelikeme = "tastelikeme.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
