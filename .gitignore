@@ -1,0 +1,5 @@
+.tastelikeme/
+__pycache__/
+*.egg-info/
+.venv/
+dist/
