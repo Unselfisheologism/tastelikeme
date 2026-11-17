@@ -39,7 +39,9 @@ def embed_texts(texts):
     except Exception:
         return "hash", [_hash_embed(t) for t in texts]
 
-def cos(a, b): return sum(x * y for x, y in zip(a, b))
+def cos(a, b):
+    if len(a) != len(b): raise ValueError("embedding dimensions differ; rebuild vectors with one backend")
+    return sum(x * y for x, y in zip(a, b))
 
 def kmeans(vecs, k, iters=25):
     """Deterministic: farthest-first init, then Lloyd iterations."""
