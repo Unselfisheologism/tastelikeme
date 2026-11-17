@@ -49,6 +49,24 @@ class E2E(unittest.TestCase):
             for f in ("canon.jsonl", "verdicts.jsonl"):
                 self.assertTrue((Path(home) / f).stat().st_size > 0)
 
+    def test_pinterest_export(self):
+        with tempfile.TemporaryDirectory() as d:
+            doc = ('<div id="contents"><h1 id=y1bkd>Pins</h1>'
+                   '<a href="https://www.pinterest.com/pin/1/">https://www.pinterest.com/pin/1/</a>'
+                   '<br>Title: neon crt poster,<br>Details: warm red scanlines,'
+                   '<br>Image: 012ed7a4306970554ea9ab2ecdb614cb,<br>Board Name: Posters,'
+                   '<br>Alive: True<br>Private: False<br><br><h1 id=z>Boards</h1></div>')
+            z = d + "/pinterest-data.zip"
+            with zipfile.ZipFile(z, "w") as zf:
+                zf.writestr("Pinterest Data/Pins.html", doc)
+            home = d + "/s"; run(home, "init")
+            out = run(home, "ingest", "pinterest-export", z)
+            self.assertIn("added 1", out); self.assertIn("LOOK at the image", out)
+            item = json.loads(run(home, "--json", "prompt"))["items"][0]
+            self.assertEqual(item["ref"], "https://i.pinimg.com/736x/01/2e/d7/012ed7a4306970554ea9ab2ecdb614cb.jpg")
+            self.assertEqual(item["origin"], "pinterest-export:Posters")
+            self.assertIn("added 0", run(home, "ingest", "pinterest-export", z, "--no-prompt"))
+
     def test_x_export(self):
         with tempfile.TemporaryDirectory() as d:
             z = d + "/x.zip"
