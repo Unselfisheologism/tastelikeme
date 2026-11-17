@@ -38,9 +38,18 @@ The store lives in `./.tastelikeme` (override with `--home` or `$TASTELIKEME_HOM
 | are.na channel | `ingest arena <slug-or-url>` | public API, no auth. `TASTELIKEME_ARENA_MAX` caps blocks (default 200) |
 | local folder | `ingest folder <path>` | images (png/jpg/webp/...) and .txt/.md |
 | X data export | `ingest x-export archive.zip` | reads `data/like.js` and `data/bookmark.js` (also under an archive prefix); test coverage uses synthetic archive fixtures, not a private user archive |
-| Pinterest board | `ingest pinterest <public-board-url>` | best effort, partial HTML snapshot only, not a full-board export; may include non-pin images or break when Pinterest changes markup |
+| Pinterest data export | `ingest pinterest-export <export.zip>` | **first-class Pinterest route: every pin on every board, secret boards included.** Request in the app or site: Settings -> Privacy and data -> Request your data; Pinterest emails a download link (can take up to 48 hours). Also accepts the extracted Pins `.html` file. Details below |
+| Pinterest board | `ingest pinterest <public-board-url>` | best effort, first-page HTML snapshot only, not a full board; may include non-pin images or break when Pinterest changes markup. Use `pinterest-export` for your full boards |
 
 Add a source: write `def mysource(target): yield {"kind": "image|text|link", "ref": ..., "title": ..., "origin": ...}` and register it in `SOURCES`.
+
+### Pinterest: full boards via your data export
+
+1. In the Pinterest app or on pinterest.com: profile -> Settings -> Privacy and data -> Request your data -> Start request.
+2. Pinterest emails a download link (their help page says it can take up to 48 hours).
+3. `tastelikeme ingest pinterest-export <export.zip>` (or the `.html` file with the Pins section, extracted from the zip).
+
+Each pin becomes an image item: a `736x` i.pinimg.com URL rebuilt from the export's image id, with your title, note, alt text and board name(s) as its text. One pin saved to several boards merges into one item that names all its boards. Pins without a usable image (videos, missing ids) become link items from their source URL. What it does **not** deliver: the export contains data and links, no image files, so URLs only work while the pins and account stay up; pins already deleted at export time are skipped, and a small share of the rest can still turn out dead. The Pinterest API v5 is deliberately not used: it requires a developer app, OAuth approval, and apps registered on or after 2026-09-14 can be denied board/pin reads for personal accounts. The export format is parsed as-is; if Pinterest changes it, intake fails with a clear error instead of guessing.
 
 ## How it works
 
@@ -60,7 +69,7 @@ Always call it with: tastelikeme --json --non-interactive <command>   (uvx --fro
 Never rely on remembered taste. Files are the truth; your context may be compacted.
 
 Setup / intake:
-1. `init` once. `ingest <arena|folder|x-export|pinterest> <target>`.
+1. `init` once. `ingest <pinterest-export|folder|arena|x-export|pinterest> <target>`. Pinterest users: `ingest pinterest-export <export.zip>` gives full boards; request the export in the Pinterest app first (Settings -> Privacy and data -> Request your data).
 2. `prompt` returns undescribed items plus a creative-director prompt. Describe each item (you must LOOK at image items; if you cannot see images, say so and mark descriptions "[text-only]"). Save with `describe --stdin` (JSON lines {"id","description"}).
 3. `canon` shows emergent clusters. Optionally `label <cluster> "<human name>"` for readability only.
 
@@ -82,15 +91,15 @@ Never ask the user for API keys. Never invent categories; clusters are computed.
 - Cluster keys come from a representative item, so they can change after new content or descriptions. Display labels follow surviving member anchors, but merges/splits can move a label or hide a conflicting label. Cluster-scoped rubrics use the current key and are not automatically migrated. Retrieval never uses display labels.
 - Run one writer per store. Append-only JSONL is not a transactional database. Invalid JSONL raises an error with its path and line number rather than silently dropping your history. Back up the store before repairing it.
 - File generations record a path, not a copy. Reusing an explicit piece ID is rejected. Auto-generated IDs are unique, including rapid repeated generations.
-- Network intake is best effort. are.na private/missing channels return an error; the default public-channel scan cap is 200 blocks. A network failure after some items were added can leave a partial import with a warning on stderr.
+- Network intake is best effort. are.na private/missing channels return an error; the default public-channel scan cap is 200 blocks. A network failure after some items were added can leave a partial import with a warning on stderr. Pinterest export intake parses the Pins HTML of the current account-export format; a format change makes it fail with a clear error, not a guess.
 
 ## Tests
 
 ```bash
 pip install -e . && python -m unittest discover -s tests
 ```
-The end-to-end test covers init, folder ingest, description prompt, describe, clustering, log, verdict with follow-up, distill trigger, rubric, brief, cadence and X export.
+The end-to-end test covers init, folder ingest, description prompt, describe, clustering, log, verdict with follow-up, distill trigger, rubric, brief, cadence and the X and Pinterest exports.
 
-The hardening suite also checks JSON-only agent intake, invalid inputs without partial writes, exact verdict boundaries, repeated IDs, malformed archives, exact are.na caps, display-only labels, and model fallback dimensions. Network sources are tested separately from the deterministic suite.
+The hardening suite also checks JSON-only agent intake, invalid inputs without partial writes, exact verdict boundaries, repeated IDs, malformed archives, exact are.na caps, display-only labels, model fallback dimensions, and Pinterest export parsing (secret boards, dead pins, board merges, bad archives). Network sources are tested separately from the deterministic suite.
 
 MIT licensed.
