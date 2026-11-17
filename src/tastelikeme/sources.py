@@ -38,10 +38,14 @@ def arena(target):
     slug = target.rstrip("/").split("/")[-1]
     page = 1
     limit = int(__import__("os").environ.get("TASTELIKEME_ARENA_MAX", "200"))
-    while page * 25 <= limit + 25:
+    if limit < 0: raise ValueError("TASTELIKEME_ARENA_MAX must not be negative")
+    scanned = 0
+    while scanned < limit:
         data = json.loads(_get(f"https://api.are.na/v2/channels/{slug}/contents?per=25&page={page}"))
         blocks = data.get("contents", [])
         for b in blocks:
+            if scanned >= limit: return
+            scanned += 1
             cls = b.get("class")
             if cls == "Image":
                 img = (b.get("image") or {}).get("original", {}).get("url") or (b.get("image") or {}).get("display", {}).get("url")
