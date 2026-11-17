@@ -14,7 +14,7 @@ uvx --from git+https://github.com/Unselfisheologism/tastelikeme tastelikeme --he
 # or: pipx install git+https://github.com/Unselfisheologism/tastelikeme
 ```
 
-First embedding run downloads a ~130MB ONNX model (`bge-small-en-v1.5`). No GPU. If it can't download, a hashing embedder takes over so nothing breaks (lower quality).
+First embedding run downloads a ~130MB ONNX model (`bge-small-en-v1.5`). No GPU. If it can't download, a hashing embedder takes over with lower quality. The store pins this fallback to avoid mixing incompatible vectors; delete `embedding.json` and `vectors.jsonl` inside the store to retry the local model. `status` reports the active backend.
 
 ## Quickstart (human)
 
@@ -37,8 +37,8 @@ The store lives in `./.tastelikeme` (override with `--home` or `$TASTELIKEME_HOM
 |---|---|---|
 | are.na channel | `ingest arena <slug-or-url>` | public API, no auth. `TASTELIKEME_ARENA_MAX` caps blocks (default 200) |
 | local folder | `ingest folder <path>` | images (png/jpg/webp/...) and .txt/.md |
-| X data export | `ingest x-export archive.zip` | reads likes and bookmarks from your X archive |
-| Pinterest board | `ingest pinterest <public-board-url>` | best effort scrape of a public board; may break if Pinterest changes markup |
+| X data export | `ingest x-export archive.zip` | reads `data/like.js` and `data/bookmark.js` (also under an archive prefix); test coverage uses synthetic archive fixtures, not a private user archive |
+| Pinterest board | `ingest pinterest <public-board-url>` | best effort, partial HTML snapshot only, not a full-board export; may include non-pin images or break when Pinterest changes markup |
 
 Add a source: write `def mysource(target): yield {"kind": "image|text|link", "ref": ..., "title": ..., "origin": ...}` and register it in `SOURCES`.
 
@@ -48,8 +48,8 @@ Add a source: write `def mysource(target): yield {"kind": "image|text|link", "re
 2. **Embeddings** run locally on CPU over the descriptions.
 3. **Branching is clustering.** There are no predefined categories. Clusters emerge from the vectors (`canon`). The agent may name a cluster (`label`) purely for human readability. Names are never used for retrieval. Retrieval of the canon items nearest your request *is* the branching. `--purpose` (thumbnail, script, tweet) is a separate tag you set per generation.
 4. **Verdicts.** `verdict --up|--down`. On a dislike the CLI asks one targeted question (`palette, layout, pacing...`). Agents get `needs_followup` in the JSON and ask the user. Vague feedback is stored, specific feedback is the training data.
-5. **`brief`** returns the current rubric plus the top liked and disliked exemplars for the request's cluster. Every generation starts cold with your whole taste injected.
-6. **Re-distill** is verdict-triggered: after every ~20 new verdicts (`config --set distill_every=N`), `brief` and `verdict` report `distill_due`. `distill` prints a prompt for your agent, which saves the result with `rubric set`. The rubric plus marked exemplars *is* the eval: a judge can score a new candidate against it with no human present.
+5. **`brief`** returns the current rubric plus the top liked and disliked exemplars for the request's cluster. The brief contains the current rubric and a small set of nearest exemplars, not the entire canon. Undescribed canon items do not appear as exemplars.
+6. **Re-distill** is verdict-triggered: after every ~20 new verdict events (a changed vote counts again; feedback amendments do not count) (`config --set distill_every=N`), `brief` and `verdict` report `distill_due`. `distill` prints a prompt for your agent, which saves the result with `rubric set`. The rubric plus marked exemplars is input for your own agent judge, not an implemented or calibrated scoring engine. Scoped rubrics do not clear the global distill reminder.
 7. **Cadence** is a config value (`init --cadence 3d`, `config --set cadence=weekly`, `off` to stop). `due` reports whether a generation is due, for a human or an agent driver alike.
 
 ## Agent instructions (copy-paste into your agent's instructions)
@@ -75,11 +75,22 @@ Generation frequency is the user's config (`due`, `config --set cadence=...`). K
 Never ask the user for API keys. Never invent categories; clusters are computed.
 ```
 
+## Input and storage limits
+
+- Global flags `--home`, `--json`, and `--non-interactive` go **before** the command. `--json` never prompts and returns one JSON document on successful data commands; errors use stderr and nonzero exit codes. `ingest` includes its description prompt in the JSON `prompt` field.
+- Folder intake uses extensions, not image decoding: nested images/text are included, unsupported extensions are ignored, and corrupt files with image extensions are still queued for the vision agent to inspect. Local file paths must remain accessible to your agent. Text intake is capped at 4,000 characters per file.
+- Cluster keys come from a representative item, so they can change after new content or descriptions. Display labels follow surviving member anchors, but merges/splits can move a label or hide a conflicting label. Cluster-scoped rubrics use the current key and are not automatically migrated. Retrieval never uses display labels.
+- Run one writer per store. Append-only JSONL is not a transactional database. Invalid JSONL raises an error with its path and line number rather than silently dropping your history. Back up the store before repairing it.
+- File generations record a path, not a copy. Reusing an explicit piece ID is rejected. Auto-generated IDs are unique, including rapid repeated generations.
+- Network intake is best effort. are.na private/missing channels return an error; the default public-channel scan cap is 200 blocks. A network failure after some items were added can leave a partial import with a warning on stderr.
+
 ## Tests
 
 ```bash
 pip install -e . && python -m unittest discover -s tests
 ```
 The end-to-end test covers init, folder ingest, description prompt, describe, clustering, log, verdict with follow-up, distill trigger, rubric, brief, cadence and X export.
+
+The hardening suite also checks JSON-only agent intake, invalid inputs without partial writes, exact verdict boundaries, repeated IDs, malformed archives, exact are.na caps, display-only labels, and model fallback dimensions. Network sources are tested separately from the deterministic suite.
 
 MIT licensed.
