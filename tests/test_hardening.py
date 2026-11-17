@@ -96,6 +96,79 @@ class Hardening(unittest.TestCase):
             with patch.dict(os.environ, TASTELIKEME_ARENA_MAX=str(cap)), patch.object(sources, '_get', return_value=json.dumps(data)):
                 self.assertEqual(len(list(sources.arena('slug'))), cap)
 
+    def _pin_row(self, pid, **kw):
+        fields = {"Title": "No data", "Details": "No data", "Image": "No data",
+                  "Board Name": "No data", "Alive": "True", "Private": "False"}
+        fields.update(kw)
+        rows = [f'<a href="https://www.pinterest.com/pin/{pid}/">https://www.pinterest.com/pin/{pid}/</a>']
+        for k, v in fields.items():
+            if k == "Canonical Link":
+                rows.append(f'<br>Canonical Link: <a href="{v}">{v}</a>,')
+            else:
+                rows.append(f"<br>{k}: {v},")
+        return "\n".join(rows)
+
+    def test_pinterest_export_full_parse(self):
+        h1_, h2 = '012ed7a4306970554ea9ab2ecdb614cb', '871591992af53cb9ada62ae6ab404604'
+        doc = ('<div id="contents"><h1 id=y1bkd>Pins</h1>'
+               + self._pin_row('1', Title='Warm poster', Details='red grid swiss typography', Image=h1_,
+                               **{'Board Name': 'Posters', 'Alt Text': 'red poster', 'Canonical Link': 'https://example.com/warm'})
+               + self._pin_row('2', Image=h2, **{'Board Name': 'Secret stuff', 'Private': 'True'})
+               + self._pin_row('3', Details='moody short film', **{'Is Video': 'Yes', 'Canonical Link': 'https://example.com/film'})
+               + self._pin_row('4', Image='c6292f772df53483d96351352e7ce646', Alive='False')
+               + '<h1 id=z>Boards</h1></div>')
+        z = self.root / 'pinterest-data.zip'
+        with zipfile.ZipFile(z, 'w') as f:
+            f.writestr('Pinterest Data/Pins.html', doc)
+            f.writestr('Pinterest Data/Profile.html', '<h1>Profile</h1>')
+        self.assertEqual(self.call('ingest', 'pinterest-export', str(z), '--no-prompt')['added'], 3)
+        by_ref = {i['ref']: i for i in Store(self.home).canon().values()}
+        u1 = f'https://i.pinimg.com/736x/{h1_[0:2]}/{h1_[2:4]}/{h1_[4:6]}/{h1_}.jpg'
+        item = by_ref[u1]
+        self.assertEqual(item['kind'], 'image')
+        self.assertEqual(item['title'], 'Warm poster')
+        self.assertEqual(item['origin'], 'pinterest-export:Posters')
+        self.assertIn('red grid swiss typography', item['text'])
+        self.assertIn('Alt text: red poster', item['text'])
+        self.assertIn('Board: Posters', item['text'])
+        secret = by_ref[f'https://i.pinimg.com/736x/{h2[0:2]}/{h2[2:4]}/{h2[4:6]}/{h2}.jpg']
+        self.assertEqual(secret['origin'], 'pinterest-export:Secret stuff')
+        self.assertEqual(by_ref['https://example.com/film']['kind'], 'link')
+        self.assertFalse(any('c6292f77' in r for r in by_ref))  # dead pin skipped
+        self.assertEqual(self.call('ingest', 'pinterest-export', str(z), '--no-prompt')['added'], 0)
+
+    def test_pinterest_export_bare_html_and_board_merge(self):
+        img = '24d7f286a8130e45ae9828642da4cca8'
+        doc = ('<h1>Pins</h1>'
+               + self._pin_row('1', Image=img, Title='grid', **{'Board Name': 'A'})
+               + self._pin_row('2', Image=img, **{'Board Name': 'B'})
+               + self._pin_row('3', Image='notahexhash', Title='weird')
+               + '<h1>Boards</h1>')
+        htmlp = self.root / 'pins.html'
+        htmlp.write_text(doc)
+        items = list(sources.pinterest_export(str(htmlp)))
+        self.assertEqual(len(items), 2)
+        merged = next(i for i in items if i['kind'] == 'image')
+        self.assertEqual(merged['origin'], 'pinterest-export:A / B')
+        self.assertIn('Board: A / B', merged['text'])
+        weird = next(i for i in items if i['kind'] == 'link')
+        self.assertEqual(weird['ref'], 'https://www.pinterest.com/pin/3/')
+        self.assertEqual(weird['title'], 'weird')
+
+    def test_pinterest_export_bad_inputs_are_clean(self):
+        before = (self.home / 'canon.jsonl').read_bytes()
+        (self.root / 'notzip.zip').write_text('hello')
+        self.call('ingest', 'pinterest-export', str(self.root / 'notzip.zip'), ok=False)
+        with zipfile.ZipFile(self.root / 'empty.zip', 'w') as f:
+            f.writestr('readme.txt', 'no html here')
+        self.call('ingest', 'pinterest-export', str(self.root / 'empty.zip'), ok=False)
+        with zipfile.ZipFile(self.root / 'nopins.zip', 'w') as f:
+            f.writestr('profile.html', '<h1>Profile</h1>')
+        self.call('ingest', 'pinterest-export', str(self.root / 'nopins.zip'), ok=False)
+        self.call('ingest', 'pinterest-export', str(self.root / 'missing.zip'), ok=False)
+        self.call('ingest', 'pinterest-export', str(self.root), ok=False)
+        self.assertEqual((self.home / 'canon.jsonl').read_bytes(), before)
+
     def test_x_likes_bookmarks_and_malformed(self):
         z = self.root/'x.zip'
         with zipfile.ZipFile(z,'w') as f:
