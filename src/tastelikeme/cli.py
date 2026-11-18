@@ -313,6 +313,7 @@ def render_brief(b):
     missing = [x for x in b.get("images", []) if x["role"] == "canon" and not x.get("path")]
     if missing:
         L.append("(no image file for: " + ", ".join(x["id"] for x in missing) + "; local file missing or URL dead. Re-ingest the file to attach it.)")
+    L.append("\nSTYLE STUDY: read .tastelikeme/reference/style_study.md (system, type, texture, bar refs) before designing.")
     L.append(f"\nverdicts since last distill: {b['verdicts_since_distill']}" + ("  -> DISTILL DUE: run `tastelikeme distill`" if b["distill_due"] else ""))
     return "\n".join(L)
 
