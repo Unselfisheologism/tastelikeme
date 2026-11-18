@@ -143,6 +143,7 @@ def cmd_ingest(a):
             if iid in known: continue
             rec = {"op": "add", "id": iid, **{k: v for k, v in it.items() if v not in (None, "")}}
             append(s.canon_p, rec); known[iid] = rec; added += 1
+            s.asset_path(rec, fetch=False)  # copy local images into the store
     except Exception as e:
         if added == 0: die(f"ingest failed: {e}", 1)
         print(f"warning: stopped early: {e}", file=sys.stderr)
@@ -247,6 +248,26 @@ def exemplars(s, cl, cluster, rvec, n):
     key = lambda e: -e["sim"]
     return near, sorted(liked, key=key)[:n], sorted(disliked, key=key)[:n]
 
+def attach_images(s, b, fetch=True):
+    """Resolve real image files for canon exemplars and liked/disliked pieces so a vision-capable
+    generator can open them. Adds 'image' to each exemplar plus a flat 'images' list."""
+    imgs = []
+    canon = s.canon()
+    for i in b["canon_nearest"]:
+        p = s.asset_path(canon[i["id"]], fetch=fetch) if i["id"] in canon else None
+        i["image"] = p
+        imgs.append({"role": "canon", "id": i["id"], "path": p})
+    for role in ("liked", "disliked"):
+        for e in b[role]:
+            f = (s.generations().get(e["piece"]) or {}).get("file")
+            p = f if f and Path(f).is_file() and Path(f).suffix.lower() in IMG_EXT_CLI else None
+            e["image"] = p
+            if p: imgs.append({"role": role, "id": e["piece"], "path": p})
+    b["images"] = imgs
+    return b
+
+IMG_EXT_CLI = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
 def make_brief(s, request, cluster_key, n):
     marker = s.root / "embedding.json"
     before = marker.read_text() if marker.exists() else None
@@ -285,17 +306,38 @@ def render_brief(b):
     L += ["", "## Liked pieces"] + [f"- [{e['piece']}] {e['request']}: {e['content'] or ''}" for e in b["liked"]] or ["(none)"]
     L += ["", "## Disliked pieces (avoid)"]
     L += [f"- [{e['piece']}] {e['request']}: {e['content'] or ''} | feedback ({e['aspect'] or 'general'}): {e['feedback'] or 'none given'}" for e in b["disliked"]] or ["(none)"]
+    shown = [x for x in b.get("images", []) if x.get("path")]
+    if shown:
+        L += ["", "## LOOK AT THESE IMAGES FIRST (vision-capable generators: open each path before designing)"]
+        L += [f"- {x['role']} [{x['id']}] {x['path']}" for x in shown]
+    missing = [x for x in b.get("images", []) if x["role"] == "canon" and not x.get("path")]
+    if missing:
+        L.append("(no image file for: " + ", ".join(x["id"] for x in missing) + "; local file missing or URL dead. Re-ingest the file to attach it.)")
     L.append(f"\nverdicts since last distill: {b['verdicts_since_distill']}" + ("  -> DISTILL DUE: run `tastelikeme distill`" if b["distill_due"] else ""))
     return "\n".join(L)
 
 def cmd_brief(a):
-    b = make_brief(store(a), a.request, a.cluster, a.n); out(a, b, render_brief(b))
+    s = store(a); b = make_brief(s, a.request, a.cluster, a.n)
+    if not a.no_images: attach_images(s, b)
+    out(a, b, render_brief(b))
+
+def cmd_assets(a):
+    """Backfill: make every canon image available as a local file inside the store."""
+    s = store(a); ok = miss = 0; gone = []
+    for it in s.canon().values():
+        if it.get("kind") != "image": continue
+        if s.asset_path(it, fetch=not a.local_only): ok += 1
+        else: miss += 1; gone.append(it["id"])
+    out(a, {"available": ok, "missing": miss, "missing_ids": gone, "dir": str(s.assets)},
+        f"{ok} image(s) in {s.assets}, {miss} unavailable" + (": " + ", ".join(gone[:20]) if gone else ""))
 
 def cmd_next(a):
     s = store(a); b = make_brief(s, a.request, a.cluster, a.n); d = gens_due(s)
+    if not a.no_images: attach_images(s, b)
     purpose = a.purpose or "unspecified"
     if a.json:
         out(a, {"due": d, "purpose": purpose, "brief": b, "instructions": [
+            "If brief.images has paths, open each image with your vision tool BEFORE generating; the descriptions are summaries, the images are the taste.",
             "Generate the piece using the brief as taste. Purpose is a tag, not a taste category.",
             "Log it: tastelikeme log --request <request> --purpose <purpose> --text <content> | --file <path>",
             "Ask the user for a verdict, then: tastelikeme verdict --piece <id> --up|--down [--feedback ...]"]}); return
@@ -412,8 +454,9 @@ def build():
     add("due", cmd_due, "is a generation due per cadence?")
     for nm, fn, h in (("brief", cmd_brief, "rubric + top liked/disliked exemplars for the request's cluster"),
                       ("next", cmd_next, "brief + generation instructions + due state")):
-        q = add(nm, fn, h); q.add_argument("--request"); q.add_argument("--cluster"); q.add_argument("--n", type=positive_int, default=3)
+        q = add(nm, fn, h); q.add_argument("--no-images", action="store_true", help="skip resolving image files for exemplars"); q.add_argument("--request"); q.add_argument("--cluster"); q.add_argument("--n", type=positive_int, default=3)
         if nm == "next": q.add_argument("--purpose", help="thumbnail, script, tweet... a tag, not a taste category")
+    q = add("assets", cmd_assets, "copy/download every canon image into the store so generators can view them"); q.add_argument("--local-only", action="store_true")
     q = add("log", cmd_log, "record a generated piece"); q.add_argument("--request"); q.add_argument("--purpose"); payload = q.add_mutually_exclusive_group(); payload.add_argument("--text"); payload.add_argument("--file"); q.add_argument("--id")
     q = add("verdict", cmd_verdict, "thumbs up/down (+ targeted feedback)"); q.add_argument("--piece"); vote = q.add_mutually_exclusive_group(); vote.add_argument("--up", action="store_true")
     vote.add_argument("--down", action="store_true"); q.add_argument("--feedback"); q.add_argument("--aspect")

@@ -1,7 +1,9 @@
 """Append-only storage. canon.jsonl, verdicts.jsonl and generations.jsonl are the
 source of truth. vectors.jsonl and clusters.json are derived and can be deleted."""
-import hashlib, json, os, time
+import hashlib, json, os, shutil, time, urllib.request
 from pathlib import Path
+
+IMG_EXT = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff'}
 
 def home(override=None):
     return Path(override or os.environ.get("TASTELIKEME_HOME") or ".tastelikeme").resolve()
@@ -43,6 +45,7 @@ class Store:
         self.clusters_p = self.root / "clusters.json"
         self.rubric_p = self.root / "rubric.jsonl"
         self.config_p = self.root / "config.json"
+        self.assets = self.root / "assets"
 
     def exists(self): return self.config_p.exists()
 
@@ -82,3 +85,31 @@ class Store:
         return {r["id"]: r for r in read(self.gens_p) if r.get("op") == "generation"}
 
     def rubrics(self): return read(self.rubric_p)
+
+    # ---------- image assets (so a vision-capable generator can LOOK at canon) ----------
+    def _asset_name(self, item):
+        ref = item.get("ref", "")
+        ext = Path(ref.split("?")[0]).suffix.lower()
+        return f"{item['id']}{ext if ext in IMG_EXT else '.jpg'}"
+
+    def asset_path(self, item, fetch=True):
+        """Return a local image path for a canon item, or None. Local refs are copied into
+        .tastelikeme/assets so the store carries its own images; URL refs are downloaded
+        once and cached. Text/link items return None."""
+        if item.get("kind") != "image": return None
+        ref = item.get("ref", ""); dest = self.assets / self._asset_name(item)
+        if dest.exists() and dest.stat().st_size > 0: return str(dest)
+        if ref.startswith(("http://", "https://")):
+            if not fetch: return None
+            try:
+                self.assets.mkdir(parents=True, exist_ok=True)
+                req = urllib.request.Request(ref, headers={"User-Agent": "Mozilla/5.0 tastelikeme"})
+                with urllib.request.urlopen(req, timeout=20) as r, open(dest, "wb") as f: f.write(r.read())
+                return str(dest) if dest.stat().st_size > 0 else None
+            except Exception:
+                if dest.exists(): dest.unlink()
+                return None
+        src = Path(ref)
+        if src.is_file():
+            self.assets.mkdir(parents=True, exist_ok=True); shutil.copyfile(src, dest); return str(dest)
+        return None

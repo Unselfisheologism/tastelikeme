@@ -103,3 +103,12 @@ The end-to-end test covers init, folder ingest, description prompt, describe, cl
 The hardening suite also checks JSON-only agent intake, invalid inputs without partial writes, exact verdict boundaries, repeated IDs, malformed archives, exact are.na caps, display-only labels, model fallback dimensions, and Pinterest export parsing (secret boards, dead pins, board merges, bad archives). Network sources are tested separately from the deterministic suite.
 
 MIT licensed.
+
+
+## Vision: generators see the real images
+
+`brief` and `next` now resolve an actual image file for every canon exemplar (and for liked/disliked pieces that are image files) and print them under **LOOK AT THESE IMAGES FIRST**; `--json` adds `images` and a per-exemplar `image` path. A vision-capable agent must open those files before generating: descriptions are summaries, the images are the taste. Pass `--no-images` to skip.
+
+- Local files are copied into `.tastelikeme/assets/` at ingest, so the store carries its own images.
+- URL items (Pinterest export pins) are downloaded once into `assets/` and cached.
+- `tastelikeme assets` backfills an older store; it reports ids whose image is gone (moved file, dead URL). Re-ingest those files.
