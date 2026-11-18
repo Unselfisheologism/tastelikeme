@@ -3,7 +3,7 @@ missing; strict flags + --json for agents (or pass --non-interactive). The CLI n
 loops and never calls a model. The harness owns the loop; this owns state and verbs."""
 import argparse, datetime as dt, hashlib, json, re, sys, uuid
 from pathlib import Path
-from . import __version__, embed, prompts, sources
+from . import __version__, embed, prompts, sources, critic
 from .store import Store, home, now, sid, append, read
 
 def interactive(a):
@@ -313,6 +313,7 @@ def render_brief(b):
     missing = [x for x in b.get("images", []) if x["role"] == "canon" and not x.get("path")]
     if missing:
         L.append("(no image file for: " + ", ".join(x["id"] for x in missing) + "; local file missing or URL dead. Re-ingest the file to attach it.)")
+    L.append("\nCRITIC: before delivery run `tastelikeme critic prompt --piece P --target <bar id> --slot S`, give it to an independent agent, then `critic record`. Pass at 8/10; fix ALL gaps; stall rule applies.")
     L.append("\nSTYLE STUDY: read .tastelikeme/reference/style_study.md (system, type, texture, bar refs) before designing.")
     L.append(f"\nverdicts since last distill: {b['verdicts_since_distill']}" + ("  -> DISTILL DUE: run `tastelikeme distill`" if b["distill_due"] else ""))
     return "\n".join(L)
@@ -412,6 +413,8 @@ def cmd_distill(a):
         g = gens.get(v["piece"], {})
         lines.append(f"- {v['verdict'].upper()} [{v['piece']}] request={g.get('request')!r} content={(g.get('text') or g.get('file') or '')[:300]!r} feedback({v.get('aspect') or 'general'})={v.get('feedback') or 'none'}")
     rub = cur[-1]["text"] if cur else "(none yet)"
+    rg = critic.recurring_gaps(s)
+    if rg: lines.append("- CRITIC recurring gaps (named in 2+ rounds, make them rules): " + "; ".join(f"{g} x{k}" for g, k in rg))
     p = prompts.DISTILL.format(rubric=rub, verdicts="\n".join(lines) or "(none)", cluster_flag=f"--cluster {a.cluster}" if a.cluster else "")
     out(a, {"new_verdicts": len(new), "prompt": p}, p)
 
@@ -427,6 +430,32 @@ def cmd_rubric(a):
     else:
         r = [r for r in s.rubrics() if r.get("cluster", "global") == (a.cluster or "global")]
         out(a, r[-1] if r else {"text": None}, r[-1]["text"] if r else "(no rubric yet)")
+
+def cmd_critic(a):
+    """Independent critic loop: `prompt` builds the fresh-context judge brief, `record` stores its verdict, `show` lists rounds."""
+    s = store(a); slot = a.slot or "default"
+    if a.action == "prompt":
+        if not (a.piece and a.target): die("critic prompt needs --piece and --target (canon id or image path)")
+        g = s.generations().get(a.piece) or die(f"unknown piece {a.piece}; log it first", 1)
+        pp = g.get("file")
+        if not pp or not Path(pp).is_file(): die("piece has no image file to judge; log it with --file", 1)
+        canon = s.canon(); tp = a.target
+        if a.target in canon: tp = s.asset_path(canon[a.target]) or die(f"no image file for canon {a.target}", 1)
+        elif not Path(a.target).is_file(): die(f"target not found: {a.target}", 1)
+        rnd, p = critic.judge_prompt(s, a.piece, tp, pp, slot)
+        out(a, {"round": rnd, "slot": slot, "piece_path": pp, "target_path": tp, "prompt": p,
+                "how": "Give prompt + both images to an INDEPENDENT fresh-context agent. Never judge your own piece."}, p)
+    elif a.action == "record":
+        if not (a.piece and a.scores): die("critic record needs --piece and --scores (JSON)")
+        if a.piece not in s.generations(): die(f"unknown piece {a.piece}", 1)
+        sc = json.loads(a.scores)
+        rnd = a.round or len(critic.records(s, slot=slot)) + 1
+        r = critic.record(s, a.piece, slot, rnd, sc, a.gap or [], a.rethought)
+        out(a, r, f"round {rnd} total {r['total']}/10 -> {r['state'].upper()}: {r['why']}")
+    else:
+        rs = critic.records(s, slot=a.slot, piece=a.piece)
+        out(a, {"rounds": rs, "recurring_gaps": critic.recurring_gaps(s)},
+            "\n".join(f"[{r['slot']} r{r['round']}] {r['piece']} {r['total']}/10 gaps: {'; '.join(r['gaps'])}" for r in rs) or "(no critic rounds yet)")
 
 def cmd_status(a):
     s = store(a); items = s.canon().values()
@@ -463,6 +492,9 @@ def build():
     vote.add_argument("--down", action="store_true"); q.add_argument("--feedback"); q.add_argument("--aspect")
     q = add("distill", cmd_distill, "emit the rubric-distillation prompt"); q.add_argument("--all", action="store_true"); q.add_argument("--cluster")
     q = add("rubric", cmd_rubric, "show or set the rubric"); q.add_argument("action", choices=["show", "set"]); q.add_argument("--text"); q.add_argument("--cluster")
+    q = add("critic", cmd_critic, "independent critic loop vs a bar image: prompt | record | show"); q.add_argument("action", choices=["prompt", "record", "show"])
+    q.add_argument("--piece"); q.add_argument("--target", help="canon id or image path of the bar image (never an AI-generated target)"); q.add_argument("--slot", help="brief family, e.g. Z, so rounds and prior verdicts chain")
+    q.add_argument("--scores", help='JSON, keys: composition, palette_material, type, object, story'); q.add_argument("--gap", action="append"); q.add_argument("--round", type=positive_int); q.add_argument("--rethought", action="store_true")
     add("status", cmd_status, "counts and config")
     return p
 

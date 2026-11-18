@@ -44,6 +44,7 @@ class Store:
         self.vec_p = self.root / "vectors.jsonl"
         self.clusters_p = self.root / "clusters.json"
         self.rubric_p = self.root / "rubric.jsonl"
+        self.critic_p = self.root / "critics.jsonl"
         self.config_p = self.root / "config.json"
         self.assets = self.root / "assets"
 

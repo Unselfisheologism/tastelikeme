@@ -112,3 +112,6 @@ MIT licensed.
 - Local files are copied into `.tastelikeme/assets/` at ingest, so the store carries its own images.
 - URL items (Pinterest export pins) are downloaded once into `assets/` and cached.
 - `tastelikeme assets` backfills an older store; it reports ids whose image is gone (moved file, dead URL). Re-ingest those files.
+
+## Critic loop (independent judge vs a bar image)
+`tastelikeme critic prompt --piece P --target <canon id|image> --slot S` builds a fresh-context judge brief (rubric: composition 3, palette/material 3, type 2, object 1, story 1; prior round's score and gaps included for consistency). Hand it and both images to an independent agent, then `critic record --piece P --slot S --scores '{...}' --gap '...'`. It returns pass (>= 8/10), continue (fix ALL gaps, max 3 loops), stall (same gap twice or no +1 in 2 rounds: rethink layout, record with --rethought) or stalled (deliver with open gaps stated). `critic show` lists rounds and recurring gaps; `distill` folds recurring gaps into the rubric prompt. The target is always a real bar image, never AI-generated. Pattern adapted from achimala/dream-loop.

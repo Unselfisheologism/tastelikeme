@@ -233,3 +233,25 @@ class Hardening(unittest.TestCase):
         self.assertEqual(cli.active_backend(s),'hash')
 
 if __name__ == '__main__': unittest.main()
+
+
+class CriticLoop(Hardening):
+    def test_critic_loop_states(self):
+        img = self.root / 'p.png'; img.write_bytes(b'x')
+        tgt = self.root / 't.png'; tgt.write_bytes(b'x')
+        for i in range(1, 5): self.call('log', '--request', 'z', '--file', str(img), '--id', f'p{i}')
+        pr = self.call('critic', 'prompt', '--piece', 'p1', '--target', str(tgt), '--slot', 'Z')
+        self.assertEqual(pr['round'], 1); self.assertIn('fresh context', pr['prompt'])
+        sc = lambda c, p, t, o, s_: json.dumps(dict(composition=c, palette_material=p, type=t, object=o, story=s_))
+        r = self.call('critic', 'record', '--piece', 'p1', '--slot', 'Z', '--scores', sc(1, 1, 1, 0, 0), '--gap', 'flat boxes')
+        self.assertEqual((r['total'], r['state']), (3.0, 'continue'))
+        pr = self.call('critic', 'prompt', '--piece', 'p2', '--target', str(tgt), '--slot', 'Z')
+        self.assertIn('PREVIOUS ROUND', pr['prompt'])
+        r = self.call('critic', 'record', '--piece', 'p2', '--slot', 'Z', '--scores', sc(2, 1, 1, 0, 0), '--gap', 'Flat boxes!')
+        self.assertEqual(r['state'], 'stall')
+        r = self.call('critic', 'record', '--piece', 'p3', '--slot', 'Z', '--scores', sc(3, 3, 2, 1, 0.5), '--gap', 'copy thin', '--rethought')
+        self.assertEqual(r['state'], 'pass')
+        self.call('critic', 'record', '--piece', 'p4', '--slot', 'Z', '--scores', sc(4, 0, 0, 0, 0), '--gap', 'x', ok=False)
+        self.call('critic', 'record', '--piece', 'p4', '--slot', 'Z', '--scores', sc(1, 1, 1, 0, 0), ok=False)
+        self.assertEqual(len(self.call('critic', 'show', '--slot', 'Z')['rounds']), 3)
+        self.assertIn('flat boxes', json.dumps(self.call('critic', 'show')['recurring_gaps']).lower())
